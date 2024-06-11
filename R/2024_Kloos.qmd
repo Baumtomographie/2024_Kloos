@@ -1,0 +1,272 @@
+---
+title: "Erlen Gartetal"
+author: "Steffen Rust"
+date: last-modified
+date-format: D. MMMM YYYY
+format: 
+  pdf:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 12.4,
+  fig.height = 9.3,
+  # fig.path = "Abbildungen/",
+  # root.dir = "../",
+  dev = "ragg_png",
+  dev.args = list(bg = "white"),
+  dpi = 300
+)
+
+library(tidyverse)
+library(magrittr)
+library(robustbase)
+library(nlme)
+library("RSQLite")
+library(ggstatsplot)
+library(lmerTest)
+library(nls2)
+library(ZugversuchR)
+library(dabestr)
+library(tidymodels)
+library(lubridate)
+library(performance)
+library(easystats)
+# library(multilevelmod)
+library(conflicted)
+source("D:/Lehre/Bachelorarbeiten/2024/2024_Oekotorsi_LWL/R/functions.R")
+
+conflict_prefer("here", "here")
+conflict_prefer("mutate", "dplyr")
+conflict_prefer("filter", "dplyr")
+conflict_prefer("summarise", "dplyr")
+conflict_prefer("rename", "dplyr")
+conflict_prefer("arrange", "dplyr")
+conflict_prefer("between", "dplyr")
+conflict_prefer("contains", "tidyselect")
+conflict_prefer("lmer", "lmerTest")
+conflict_prefer("fixed", "stringr")
+```
+
+```{r}
+ggplot2::theme_set(see::theme_modern(base_size = 12))
+```
+
+# Dateneinlesen
+
+## Metadaten aus Datenbank
+
+```{r Metadaten_einlesen}
+#| cache: true
+Datenbank <- "../Daten/Kloos.sqlite"
+
+Baeume <- Baeume_einlesen(Datenbank, c("Gartetal"))
+
+Instrumente <- Instrumente_einlesen(Datenbank)
+
+Messungen_Tabelle <- Messungen_einlesen(Datenbank)
+
+Messungen <- Metadaten_kombinieren(Messungen_Tabelle, Instrumente, Baeume)
+```
+
+## Messdaten
+
+```{r Messdaten_einlesen}
+#| cache: true
+Daten <- ZugversuchR::Verzeichnis_einlesen("../Daten") %>%
+  mutate(Datei = stringi::stri_replace_all_fixed(
+    basename(Datei),
+    ".TXT",
+    "",
+    opts_fixed = list(case_insensitive = TRUE)
+  ))
+
+# Seilwinkel <- Seilwinkel_einlesen() #ZugversuchR::RopeAngle(Daten)
+
+Kraefte <- Kraefte_einlesen(Daten, Messungen)
+
+Neigungen <- Neigungen_einlesen(Daten, Kraefte, Messungen)
+```
+```{r}
+#| eval: false
+plot_list <- Neigungen %>%
+  dplyr::group_by(BaumID) %>%
+  tidyr::nest() %>%
+  dplyr::mutate(Bild = purrr::map2(
+    data,
+    BaumID,
+    ~ ggplot2::ggplot(data = .x, aes(x = BiegemomentBasis, y = Neigung)) +
+      geom_point(aes(colour = factor(Geraet))) +
+      # stat_ck(color = "red") +
+      xlim(0, max(.x$BiegemomentBasis, na.rm = TRUE)) +
+      ylim(0, 0.255) +
+      facet_wrap(vars(Datei)) +
+      ggtitle(.y)
+  )) %>%
+  dplyr::select(-data)
+
+
+pdf(file = "../doc/Kippkurven.pdf")
+purrr::walk(plot_list$Bild, print)
+
+dev.off()
+```
+
+## Verankerung
+
+Für die Berechnung werden alle Inclinos mit einer Höhe von weniger als 0,5 m verwendet. 
+Die Verankerung wird dann für jeden Baum und jedes Datum berechnet. 
+Dazu wird eine Ausgleichskurve für die Last in Abhängigkeit von der Neigung verwendet und die Last bei 0,1° aus der Kurve geschätzt.
+Die Verankerung wird dann gewichtet nach der maximalen Neigung des Baumes (1: 0-0,1°, 2: 0,1-0,24°, 3: >0,24°) und der Mittelwert jedes Baumes daraus berechnet.
+
+```{r Verankerung}
+#| cache: true
+Verankerung <- Neigungen %>%
+  filter(Hoehe < 0.5) %>%
+  group_by(BaumID, Datei, Geraet) %>%
+  summarise(
+    BM_0.25 = ZugversuchR::Verankerung_Kurve_neu(BiegemomentBasis, Neigung, angle = 0.1)
+  ) %>%
+  as_tibble()
+```
+```{r}
+Verankerung <- left_join(Verankerung, Messungen, by = join_by(BaumID, Datei, Geraet == GeraeteID))
+```
+
+```{r}
+Verankerung %<>%
+  select(BaumID:BM_0.25, Lastrichtung, Ausrichtung) %>%
+  separate_wider_delim(
+    Ausrichtung,
+    names = c("Ausrichtung"),
+    too_many = "drop",
+    delim = " "
+  ) %>%
+  mutate(
+    Ausrichtung = case_when(
+      Lastrichtung == "North" & Ausrichtung == "links" ~ "East",
+      Lastrichtung == "North" & Ausrichtung == "rechts" ~ "West",
+      Lastrichtung == "South" & Ausrichtung == "links" ~ "West",
+      Lastrichtung == "South" & Ausrichtung == "rechts" ~ "East"
+    )
+  ) %>%
+  left_join(select(Baeume, BaumID, g), by = "BaumID")
+```
+
+
+## Formal Analysis
+
+### Regression
+
+```{r}
+mod_rob <- lmrob(
+  BM_0.25 ~ g,
+  data = Verankerung,
+  setting = "KS2014"
+)
+
+summary(mod_rob)
+```
+
+### ANOVA
+
+```{r gls1}
+#| include: false
+mod1 <- gls(BM_0.25 ~ g* Lastrichtung * Ausrichtung,
+  data = Verankerung
+)
+
+anova(mod1)
+```
+
+```{r gls2}
+#| include: false
+mod2 <- recipes::update(mod1, weights = varIdent(form = ~ 1 | Lastrichtung))
+mod3 <- recipes::update(mod1, weights = varIdent(form = ~ 1 | Ausrichtung))
+mod4 <- recipes::update(mod1, weights = varPower(form = ~ g | Lastrichtung))
+mod5 <- recipes::update(mod1, weights = varPower(form = ~ g | Ausrichtung))
+
+MuMIn::model.sel(mod1, mod2, mod3, mod4, mod5, rank = "AICc")
+```
+
+```{r}
+check_model(mod5)
+```
+
+### Mixed-effects model
+
+
+
+
+
+
+```{r model_full1}
+#| eval: false
+model_full1 <- lmer(
+  BM_0.25 ~ g * Lastrichtung * Ausrichtung + (1 | BaumID),
+  data = Verankerung
+)
+```
+
+```{r}
+#| eval: false
+anova(model_full1)
+```
+```{r}
+#| eval: false
+select_parameters(model_full1)
+```
+
+```{r}
+#| eval: false
+estimate_means(model_full1, at = c("g", "Ausrichtung")) %>%
+  plot() +
+  ylab("Mean bending moment at 0.1°, kN/m") +
+  xlab("Direction") + theme(
+    plot.title = element_blank()
+  )
+```
+
+
+```{r model_full}
+model_full <- lme(
+  BM_0.25 ~ g * Lastrichtung * Ausrichtung,
+  random = ~ 1 | BaumID, 
+  weights = varPower(form = ~ g | Ausrichtung),
+  data = Verankerung
+)
+```
+
+```{r}
+anova(model_full)
+```
+
+
+
+```{r}
+#| eval: false
+plot(compare_performance( model_full, model_full1, rank = TRUE, verbose = FALSE))
+```
+
+```{r}
+estimate_means(model_full, at = c("Lastrichtung", "Ausrichtung")) %>%
+  plot() +
+  ylab("Mean bending moment at 0.1°, kN/m") +
+  xlab("Direction") + theme(
+    plot.title = element_blank()
+  )
+```
+```{r}
+check_model(model_full)
+```
+
+
+
+```{r}
+#| eval: false
+report(model_full)
+```
