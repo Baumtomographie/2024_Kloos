@@ -138,6 +138,13 @@ Verankerung <- left_join(Verankerung, Messungen, by = join_by(BaumID, Datei, Ger
 ```
 
 ```{r}
+#| eval: false
+Verankerung %>% 
+  select(BaumID, Datei, Geraet, BM_0.25) %>%
+  write.csv2("../Daten/Verankerung.csv", row.names = FALSE)
+```
+
+```{r}
 Verankerung %<>%
   select(BaumID:BM_0.25, Lastrichtung, Ausrichtung) %>%
   separate_wider_delim(
@@ -176,7 +183,7 @@ summary(mod_rob)
 
 ```{r gls1}
 #| include: false
-mod1 <- gls(BM_0.25 ~ g* Lastrichtung * Ausrichtung,
+mod1 <- gls(BM_0.25 ~ g * Lastrichtung * Ausrichtung,
   data = Verankerung
 )
 
@@ -235,7 +242,7 @@ estimate_means(model_full1, at = c("g", "Ausrichtung")) %>%
 ```{r model_full}
 model_full <- lme(
   BM_0.25 ~ g * Lastrichtung * Ausrichtung,
-  random = ~ 1 | BaumID, 
+  random = ~ 1 | BaumID,
   weights = varPower(form = ~ g | Ausrichtung),
   data = Verankerung
 )
@@ -249,7 +256,7 @@ anova(model_full)
 
 ```{r}
 #| eval: false
-plot(compare_performance( model_full, model_full1, rank = TRUE, verbose = FALSE))
+plot(compare_performance(model_full, model_full1, rank = TRUE, verbose = FALSE))
 ```
 
 ```{r}
